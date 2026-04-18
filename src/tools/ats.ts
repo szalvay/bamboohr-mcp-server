@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { BambooHRClient } from "../client.js";
 import { textResult, errorResult } from "../types.js";
+import { archive } from "../archive.js";
 
 
 export function registerAtsTools(server: McpServer, client: BambooHRClient) {
@@ -18,6 +19,7 @@ export function registerAtsTools(server: McpServer, client: BambooHRClient) {
     async ({ page, jobStatusGroups }) => {
       try {
         const data = await client.listJobs({ page, jobStatusGroups });
+        archive("list_jobs", { page, jobStatusGroups }, data);
         return textResult(data);
       } catch (e: any) {
         return errorResult(e.message);
@@ -47,6 +49,11 @@ export function registerAtsTools(server: McpServer, client: BambooHRClient) {
           searchString,
           newSince,
         });
+        archive(
+          "list_applications",
+          { page, jobId, applicationStatusId, searchString, newSince },
+          data
+        );
         return textResult(data);
       } catch (e: any) {
         return errorResult(e.message);
@@ -63,6 +70,7 @@ export function registerAtsTools(server: McpServer, client: BambooHRClient) {
     async ({ applicationId }) => {
       try {
         const data = await client.getApplication(applicationId);
+        archive("get_application", { applicationId }, data);
         return textResult(data);
       } catch (e: any) {
         return errorResult(e.message);
@@ -80,6 +88,7 @@ export function registerAtsTools(server: McpServer, client: BambooHRClient) {
     async ({ applicationId, comment }) => {
       try {
         const data = await client.addApplicationComment(applicationId, comment);
+        archive("add_application_comment", { applicationId, comment }, data);
         return textResult(data);
       } catch (e: any) {
         return errorResult(e.message);
@@ -97,6 +106,7 @@ export function registerAtsTools(server: McpServer, client: BambooHRClient) {
     async ({ applicationId, statusId }) => {
       try {
         const data = await client.updateApplicationStatus(applicationId, statusId);
+        archive("update_application_status", { applicationId, statusId }, data);
         return textResult(data);
       } catch (e: any) {
         return errorResult(e.message);

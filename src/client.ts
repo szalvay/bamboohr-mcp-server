@@ -1,12 +1,128 @@
+// Dataset field lists for the preset reports. Exported so validate_presets
+// can introspect them without duplication.
+export const PAY_RATES_FIELDS = [
+  "firstName",
+  "lastName",
+  "employeeNumber",
+  "status",
+  "compensationPayType",
+  "compensationPayRate",
+  "compensationStartDate",
+  "jobInformationJobTitle",
+  "jobInformationLocation",
+];
+
+export const PAY_RATES_MANAGERS_FIELDS = [
+  "firstName",
+  "lastName",
+  "employeeNumber",
+  "status",
+  "compensationPayType",
+  "compensationPayRate",
+  "compensationStartDate",
+];
+
+const PAY_RATES_COLUMNS = [
+  "employee_number",
+  "first_name",
+  "last_name",
+  "status",
+  "pay_type",
+  "pay_rate",
+  "effective_date",
+  "job_title",
+  "home_clinic_location",
+];
+
+const PAY_RATES_MANAGERS_COLUMNS = [
+  "employee_number",
+  "first_name",
+  "last_name",
+  "status",
+  "pay_type",
+  "pay_rate",
+  "effective_date",
+];
+
+const TIME_OFF_USED_COLUMNS = [
+  "employee_number",
+  "name",
+  "category",
+  "from",
+  "to",
+  "requested",
+  "approved",
+  "notes",
+  "time_off",
+  "units",
+];
+
+function extractRows(raw: unknown): any[] {
+  if (Array.isArray(raw)) return raw;
+  if (raw && typeof raw === "object") {
+    const obj = raw as any;
+    if (Array.isArray(obj.data)) return obj.data;
+    if (Array.isArray(obj.employees)) return obj.employees;
+    if (Array.isArray(obj.results)) return obj.results;
+  }
+  return [];
+}
+
+function parseNumeric(v: unknown): number | null {
+  if (v == null || v === "") return null;
+  const n = typeof v === "number" ? v : parseFloat(String(v));
+  return Number.isFinite(n) ? n : null;
+}
+
+function shapePayRatesRow(r: any, includeJob: boolean): Record<string, unknown> {
+  const row: Record<string, unknown> = {
+    employee_number: r.employeeNumber ?? null,
+    first_name: r.firstName ?? null,
+    last_name: r.lastName ?? null,
+    status: r.status ?? null,
+    pay_type: r.compensationPayType ?? null,
+    pay_rate: parseNumeric(r.compensationPayRate) ?? r.compensationPayRate ?? null,
+    effective_date: r.compensationStartDate ?? null,
+  };
+  if (includeJob) {
+    row.job_title = r.jobInformationJobTitle ?? null;
+    row.home_clinic_location = r.jobInformationLocation ?? null;
+  }
+  return row;
+}
+
+function normalizeNotes(notes: unknown): string | null {
+  if (notes == null) return null;
+  if (typeof notes === "string") return notes.trim() || null;
+  if (Array.isArray(notes)) {
+    const parts = notes
+      .map((n) => (typeof n === "string" ? n : n?.text ?? n?.note ?? ""))
+      .filter((s) => typeof s === "string" && s.trim().length > 0);
+    return parts.length ? parts.join("; ") : null;
+  }
+  if (typeof notes === "object") {
+    const vals = Object.values(notes as Record<string, unknown>).filter(
+      (v) => typeof v === "string" && v.trim().length > 0
+    ) as string[];
+    return vals.length ? vals.join("; ") : null;
+  }
+  return String(notes);
+}
+
+function ymdOnly(v: unknown): string | null {
+  if (!v) return null;
+  const s = String(v);
+  const m = s.match(/^\d{4}-\d{2}-\d{2}/);
+  return m ? m[0] : s;
+}
+
 export class BambooHRClient {
   private baseUrl: string;
   private apiHostBaseUrl: string;
   private authToken: string;
 
   constructor(companyDomain: string, apiKey: string) {
-    // Tenant host — works for /employees, /time_off, etc.
     this.baseUrl = `https://${companyDomain}.bamboohr.com/api/gateway.php/${companyDomain}/v1`;
-    // Central API host — required for /reports/{id} (tenant host 404s on this route).
     this.apiHostBaseUrl = `https://api.bamboohr.com/api/gateway.php/${companyDomain}/v1`;
     this.authToken = Buffer.from(`${apiKey}:x`).toString("base64");
   }
@@ -43,6 +159,29 @@ export class BambooHRClient {
     return this.request(`/employees/${id}${qs ? `?${qs}` : ""}`);
   }
 
+  /** Lightweight auth/connectivity check. Returns a self-describing status envelope. */
+  async ping(): Promise<unknown> {
+    const started = Date.now();
+    try {
+      const dir = (await this.getEmployeeDirectory()) as any;
+      const count = Array.isArray(dir?.employees) ? dir.employees.length : null;
+      return {
+        ok: true,
+        tenant: this.baseUrl,
+        employees_visible: count,
+        latency_ms: Date.now() - started,
+        message: "Authenticated successfully.",
+      };
+    } catch (e: any) {
+      return {
+        ok: false,
+        tenant: this.baseUrl,
+        latency_ms: Date.now() - started,
+        error: e.message,
+      };
+    }
+  }
+
   // --- Time Off ---
 
   async getTimeOffRequests(params: {
@@ -73,6 +212,54 @@ export class BambooHRClient {
     if (end) sp.set("end", end);
     const qs = sp.toString();
     return this.request(`/employees/${employeeId}/time_off/calculator${qs ? `?${qs}` : ""}`);
+  }
+
+  /**
+   * Shape approved time-off requests into the 10-column Time Off Used report
+   * (BHR UI Report 13). Optional category filter (e.g. "Sick") runs client-side.
+   */
+  async getTimeOffUsedReport(
+    start: string,
+    end: string,
+    category?: string
+  ): Promise<unknown> {
+    const raw = (await this.getTimeOffRequests({
+      start,
+      end,
+      status: "approved",
+    })) as any;
+    const list: any[] = Array.isArray(raw) ? raw : raw?.requests ?? [];
+    const filtered = category
+      ? list.filter((r) => {
+          const cat = r?.type?.name ?? r?.type ?? "";
+          return String(cat).toLowerCase() === category.toLowerCase();
+        })
+      : list;
+    const rows = filtered.map((r) => ({
+      employee_number: r.employeeId ?? null,
+      name: r.name ?? null,
+      category: r?.type?.name ?? r?.type ?? null,
+      from: ymdOnly(r.start),
+      to: ymdOnly(r.end),
+      requested: ymdOnly(r.created),
+      approved:
+        r?.status?.status === "approved" ? ymdOnly(r?.status?.lastChanged) : null,
+      notes: normalizeNotes(r.notes),
+      time_off: parseNumeric(r?.amount?.amount),
+      units: r?.amount?.unit ?? null,
+    }));
+    return {
+      preset: "Time Off Used (UI Report 13)",
+      filters: {
+        start,
+        end,
+        status: "approved",
+        category: category ?? null,
+      },
+      columns: TIME_OFF_USED_COLUMNS,
+      row_count: rows.length,
+      rows,
+    };
   }
 
   // --- ATS ---
@@ -125,7 +312,6 @@ export class BambooHRClient {
 
   // --- Datasets (new reports API) ---
 
-  /** List available datasets (e.g. employee, applicants). */
   async listDatasets(): Promise<unknown> {
     const url = `${this.apiHostBaseUrl}/datasets/`;
     const res = await fetch(url, {
@@ -141,7 +327,6 @@ export class BambooHRClient {
     return res.json();
   }
 
-  /** List the queryable fields for a dataset. */
   async listDatasetFields(dataset: string): Promise<unknown> {
     const url = `${this.apiHostBaseUrl}/datasets/${encodeURIComponent(dataset)}/fields/`;
     const res = await fetch(url, {
@@ -157,10 +342,6 @@ export class BambooHRClient {
     return res.json();
   }
 
-  /**
-   * Query a dataset. Body shape: { fields: [...], filters?: {...} }.
-   * Returns JSON with the selected fields for every matching record.
-   */
   async queryDataset(
     dataset: string,
     fields: string[],
@@ -187,14 +368,13 @@ export class BambooHRClient {
     }
     const text = await res.text();
     if (!text) {
-      // BHR returns 200 + empty body when it recognizes a key but rejects the
-      // shape under it. Seen for any `filters` value we've tried — the tenant's
-      // filter schema isn't publicly documented.
+      // BHR returns 200 + empty body when it recognizes `filters` but rejects the
+      // shape. The tenant's filter schema isn't publicly documented — we always
+      // filter client-side as a result.
       if (filters !== undefined) {
         throw new Error(
           "BambooHR returned an empty body, which happens when it silently rejects " +
-            "the `filters` shape. The Datasets API filter schema on this tenant is not " +
-            "documented — for now, fetch without filters and filter client-side."
+            "the `filters` shape. Fetch without filters and filter client-side."
         );
       }
       throw new Error("BambooHR returned an empty body for this dataset query.");
@@ -202,81 +382,139 @@ export class BambooHRClient {
     return JSON.parse(text);
   }
 
-  // --- Reports (legacy shim — this tenant uses the Datasets API) ---
+  // --- Presets (UI report parity) ---
 
   /**
-   * BambooHR's classic /reports/{id} endpoint is not served on this tenant.
-   * Use query_dataset / list_datasets instead.
+   * UI Report 1: Pay Rates. Active employees on Hourly or Commission Only pay types.
+   * Returns rows shaped like the xlsx export (9 columns).
+   * Optional clinicCode filters by Home Clinic / Location prefix (e.g. "0367").
    */
+  async getPayRates(opts?: { clinicCode?: string }): Promise<unknown> {
+    const raw = await this.queryDataset("employee", PAY_RATES_FIELDS);
+    const rows = extractRows(raw);
+    const filtered = rows.filter((r) => {
+      if (r.status !== "Active") return false;
+      const pt = r.compensationPayType;
+      if (pt !== "Hourly" && pt !== "Commission Only") return false;
+      if (opts?.clinicCode) {
+        const loc = String(r.jobInformationLocation ?? "");
+        if (!loc.startsWith(opts.clinicCode)) return false;
+      }
+      return true;
+    });
+    return {
+      preset: "Pay Rates (UI Report 1)",
+      dataset: "employee",
+      bhr_fields: PAY_RATES_FIELDS,
+      filters: {
+        status: "Active",
+        pay_type: ["Hourly", "Commission Only"],
+        clinic_code: opts?.clinicCode ?? null,
+      },
+      columns: PAY_RATES_COLUMNS,
+      row_count: filtered.length,
+      rows: filtered.map((r) => shapePayRatesRow(r, true)),
+    };
+  }
+
+  /**
+   * UI Report 3: Pay Rate - Managers. Active employees on Salary pay type.
+   * Returns rows shaped like the xlsx export (7 columns, no Job Title or Location).
+   */
+  async getPayRatesManagers(): Promise<unknown> {
+    const raw = await this.queryDataset("employee", PAY_RATES_MANAGERS_FIELDS);
+    const rows = extractRows(raw);
+    const filtered = rows.filter(
+      (r) => r.status === "Active" && r.compensationPayType === "Salary"
+    );
+    return {
+      preset: "Pay Rate - Managers (UI Report 3)",
+      dataset: "employee",
+      bhr_fields: PAY_RATES_MANAGERS_FIELDS,
+      filters: { status: "Active", pay_type: "Salary" },
+      columns: PAY_RATES_MANAGERS_COLUMNS,
+      row_count: filtered.length,
+      rows: filtered.map((r) => shapePayRatesRow(r, false)),
+    };
+  }
+
+  // --- Reports (legacy shim — this tenant uses the Datasets API) ---
+
   async listReports(): Promise<never> {
     throw new Error(
       "This BambooHR tenant uses the Datasets API, not the legacy /reports endpoint. " +
         "Use list_datasets to discover available datasets, list_dataset_fields(dataset) to " +
-        "discover columns, and query_dataset(dataset, fields) to fetch rows."
+        "discover columns, and query_dataset(dataset, fields) to fetch rows. For the " +
+        "common UI reports, use get_pay_rates / get_pay_rates_managers / get_time_off_used_report."
     );
   }
 
   /**
-   * Legacy get_report shim. BambooHR's /reports/{id} endpoint is not served on this tenant
-   * (it's been replaced by the Datasets API). We map known UI report IDs to curated dataset
-   * queries so existing callers keep working; everything else returns a clear migration hint.
+   * Legacy dispatcher. Maps UI report IDs to the new dedicated methods so
+   * existing callers keep working.
    *
-   * Known preset IDs:
-   *   1 / "pay_rates"          → employee dataset, Pay Rates column set
-   *   3 / "pay_rates_managers" → employee dataset, Pay Rates column set (filter managers client-side)
-   *
-   * For anything else, use query_dataset directly.
+   *   1 / "pay_rates"           → getPayRates (optional clinic_code)
+   *   3 / "pay_rates_managers"  → getPayRatesManagers
    */
-  async getReport(reportId: string, _format: string = "JSON"): Promise<unknown> {
+  async getReport(
+    reportId: string,
+    _format: string = "JSON",
+    opts?: { clinicCode?: string }
+  ): Promise<unknown> {
     const id = String(reportId).trim().toLowerCase();
-
-    const PAY_RATES_FIELDS = [
-      "firstName",
-      "lastName",
-      "preferredName",
-      "employeeNumber",
-      "status",
-      "employmentStatus",
-      "jobInformationJobTitle",
-      "jobInformationLocation",
-      "jobInformationDepartment",
-      "compensationPayRate",
-      "compensationPayRateCurrencyCode",
-      "compensationPayType",
-      "compensationPaidPer",
-      "compensationOvertimeStatus",
-      "hireDate",
-      "terminationDate",
-      "supervisorName",
-      "email",
-    ];
-
-    const presets: Record<string, { dataset: string; fields: string[]; note?: string }> = {
-      "1": { dataset: "employee", fields: PAY_RATES_FIELDS, note: "Pay Rates (all employees)" },
-      "pay_rates": { dataset: "employee", fields: PAY_RATES_FIELDS, note: "Pay Rates (all employees)" },
-      "3": {
-        dataset: "employee",
-        fields: PAY_RATES_FIELDS,
-        note: "Pay Rates - Managers (returns all employees; filter by supervisorName/isSupervisor client-side)",
-      },
-      "pay_rates_managers": {
-        dataset: "employee",
-        fields: PAY_RATES_FIELDS,
-        note: "Pay Rates - Managers (returns all employees; filter by supervisorName/isSupervisor client-side)",
-      },
-    };
-
-    const preset = presets[id];
-    if (!preset) {
-      throw new Error(
-        `get_report: reportId "${reportId}" is not a known preset on this tenant. ` +
-          `Legacy /reports/{id} endpoint is not served by BambooHR here — the tenant uses the Datasets API. ` +
-          `Use list_datasets / list_dataset_fields / query_dataset directly. ` +
-          `Known get_report preset IDs: 1 or "pay_rates", 3 or "pay_rates_managers".`
-      );
+    if (id === "1" || id === "pay_rates") {
+      return this.getPayRates(opts);
     }
+    if (id === "3" || id === "pay_rates_managers") {
+      return this.getPayRatesManagers();
+    }
+    throw new Error(
+      `get_report: reportId "${reportId}" is not a known preset. ` +
+        `Known IDs: 1 / "pay_rates", 3 / "pay_rates_managers". ` +
+        `Prefer the dedicated tools get_pay_rates / get_pay_rates_managers / get_time_off_used_report, ` +
+        `or use query_dataset for arbitrary queries.`
+    );
+  }
 
-    const data = await this.queryDataset(preset.dataset, preset.fields);
-    return { preset: preset.note, dataset: preset.dataset, fields: preset.fields, data };
+  /**
+   * Introspect each preset's baked-in field list against the tenant's current
+   * dataset schema and flag any fields that no longer exist. Run before a
+   * payroll cycle to catch silent drift.
+   */
+  async validatePresets(): Promise<unknown> {
+    const targets = [
+      { preset: "pay_rates", dataset: "employee", fields: PAY_RATES_FIELDS },
+      {
+        preset: "pay_rates_managers",
+        dataset: "employee",
+        fields: PAY_RATES_MANAGERS_FIELDS,
+      },
+    ];
+    const results: unknown[] = [];
+    for (const t of targets) {
+      try {
+        const schema = (await this.listDatasetFields(t.dataset)) as any;
+        const available = new Set<string>(
+          Array.isArray(schema?.fields) ? schema.fields.map((f: any) => f.name) : []
+        );
+        const missing = t.fields.filter((f) => !available.has(f));
+        results.push({
+          preset: t.preset,
+          dataset: t.dataset,
+          ok: missing.length === 0,
+          fields_checked: t.fields.length,
+          available_fields_on_tenant: available.size,
+          missing,
+        });
+      } catch (e: any) {
+        results.push({
+          preset: t.preset,
+          dataset: t.dataset,
+          ok: false,
+          error: e.message,
+        });
+      }
+    }
+    return { checked_at: new Date().toISOString(), results };
   }
 }
