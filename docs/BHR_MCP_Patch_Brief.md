@@ -207,6 +207,27 @@ The brief assumed BHR's documented `/reports/{id}` contract held on this tenant.
 
 ### Notes for future MCP work
 
-- `filters` body shape for `query_dataset` has not yet been tested end-to-end. Server-side filtering should follow BHR's conventional `{match: "all"|"any", fields: [{name, operator, value}]}` structure, but verify with a one-off probe before relying on it.
 - Binary (XLS/PDF) output via the Datasets API has not been explored — Datasets returns JSON only. If binary exports are needed later, look at `/employees/directory` style endpoints or re-check whether `/reports/*` has been turned back on.
 - Built-in reports (negative IDs like `-13` for Time Off Used) remain accessible only via their dedicated endpoints (e.g. `get_time_off_requests`), not via `get_report`.
+
+### Server-side filters — confirmed not usable (2026-04-17)
+
+Probed multiple body-shape variants against `POST /v1/datasets/employee/`:
+
+| Variant | Body / method | Result |
+|---|---|---|
+| `filters` = `{match:"all", fields:[{name,operator,value}]}` | POST | 200, **0 bytes** |
+| `filters` = `[{field,operator,value}]` | POST | 200, **0 bytes** |
+| `filters` = `{status:{equals:"Active"}}` | POST | 200, **0 bytes** |
+| `filters` = `{status:"Active"}` | POST | 200, **0 bytes** |
+| `filter` (singular) = any shape | POST | 200, full unfiltered result (ignored) |
+| `where` / `conditions` = any shape | POST | 200, full unfiltered result (ignored) |
+| `?status=Active` query param | POST | 200, full unfiltered result (ignored) |
+| `GET ?fields=...&status=...` | GET | 404 (GET not allowed) |
+| `OPTIONS` | OPTIONS | `Allow: POST` |
+
+**Interpretation:** BHR recognizes `filters` as a real keyword and silently rejects bad shapes by returning a zero-byte body. Every alternate keyword (`filter`, `where`, `conditions`) is silently ignored and returns the full unfiltered dataset. No documented shape worked. The public BHR Datasets API on this tenant appears to support **field projection only** — filter at the caller.
+
+**Client hardening:** `queryDataset` now detects the zero-byte-body case and throws a clear error pointing at the `filters` shape issue, instead of the opaque "Unexpected end of JSON input" from `res.json()`.
+
+**Recommendation:** do not pass `filters` to `query_dataset`. Fetch the full dataset and filter client-side. 845 employees × ~20 fields is ~120KB — well within one call.

@@ -185,7 +185,21 @@ export class BambooHRClient {
       const b = await res.text();
       throw new Error(`BambooHR API error ${res.status}: ${b}`);
     }
-    return res.json();
+    const text = await res.text();
+    if (!text) {
+      // BHR returns 200 + empty body when it recognizes a key but rejects the
+      // shape under it. Seen for any `filters` value we've tried — the tenant's
+      // filter schema isn't publicly documented.
+      if (filters !== undefined) {
+        throw new Error(
+          "BambooHR returned an empty body, which happens when it silently rejects " +
+            "the `filters` shape. The Datasets API filter schema on this tenant is not " +
+            "documented — for now, fetch without filters and filter client-side."
+        );
+      }
+      throw new Error("BambooHR returned an empty body for this dataset query.");
+    }
+    return JSON.parse(text);
   }
 
   // --- Reports (legacy shim — this tenant uses the Datasets API) ---
