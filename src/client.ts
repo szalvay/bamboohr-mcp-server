@@ -7,7 +7,7 @@ export const PAY_RATES_FIELDS = [
   "status",
   "compensationPayType",
   "compensationPayRate",
-  "compensationStartDate",
+  "compensationEffectiveDate",
   "jobInformationJobTitle",
   "jobInformationLocation",
 ];
@@ -19,7 +19,7 @@ export const PAY_RATES_MANAGERS_FIELDS = [
   "status",
   "compensationPayType",
   "compensationPayRate",
-  "compensationStartDate",
+  "compensationEffectiveDate",
 ];
 
 const PAY_RATES_COLUMNS = [
@@ -82,7 +82,7 @@ function shapePayRatesRow(r: any, includeJob: boolean): Record<string, unknown> 
     status: r.status ?? null,
     pay_type: r.compensationPayType ?? null,
     pay_rate: parseNumeric(r.compensationPayRate) ?? r.compensationPayRate ?? null,
-    effective_date: r.compensationStartDate ?? null,
+    effective_date: r.compensationEffectiveDate ?? null,
   };
   if (includeJob) {
     row.job_title = r.jobInformationJobTitle ?? null;
@@ -350,36 +350,59 @@ export class BambooHRClient {
     if (!Array.isArray(fields) || fields.length === 0) {
       throw new Error("queryDataset: fields must be a non-empty array of field names.");
     }
-    const url = `${this.apiHostBaseUrl}/datasets/${encodeURIComponent(dataset)}/`;
+    const firstUrl = `${this.apiHostBaseUrl}/datasets/${encodeURIComponent(dataset)}/`;
     const body: Record<string, unknown> = { fields };
     if (filters !== undefined) body.filters = filters;
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Basic ${this.authToken}`,
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const b = await res.text();
-      throw new Error(`BambooHR API error ${res.status}: ${b}`);
-    }
-    const text = await res.text();
-    if (!text) {
-      // BHR returns 200 + empty body when it recognizes `filters` but rejects the
-      // shape. The tenant's filter schema isn't publicly documented — we always
-      // filter client-side as a result.
-      if (filters !== undefined) {
-        throw new Error(
-          "BambooHR returned an empty body, which happens when it silently rejects " +
-            "the `filters` shape. Fetch without filters and filter client-side."
-        );
+
+    const allRows: unknown[] = [];
+    let aggregations: unknown = undefined;
+    let pageUrl: string | null = firstUrl;
+    let pageCount = 0;
+    const MAX_PAGES = 50; // hard safety stop
+
+    while (pageUrl && pageCount < MAX_PAGES) {
+      const res: Response = await fetch(pageUrl, {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${this.authToken}`,
+          Accept: "application/json",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const b = await res.text();
+        throw new Error(`BambooHR API error ${res.status}: ${b}`);
       }
-      throw new Error("BambooHR returned an empty body for this dataset query.");
+      const text = await res.text();
+      if (!text) {
+        // BHR returns 200 + empty body when it recognizes `filters` but rejects the
+        // shape. The tenant's filter schema isn't publicly documented — we always
+        // filter client-side as a result.
+        if (filters !== undefined) {
+          throw new Error(
+            "BambooHR returned an empty body, which happens when it silently rejects " +
+              "the `filters` shape. Fetch without filters and filter client-side."
+          );
+        }
+        throw new Error("BambooHR returned an empty body for this dataset query.");
+      }
+      const parsed: any = JSON.parse(text);
+      if (Array.isArray(parsed?.data)) {
+        allRows.push(...parsed.data);
+      } else if (Array.isArray(parsed)) {
+        allRows.push(...parsed);
+      }
+      if (parsed?.aggregations !== undefined) aggregations = parsed.aggregations;
+      pageUrl = parsed?.pagination?.next_page ?? null;
+      pageCount++;
     }
-    return JSON.parse(text);
+
+    return {
+      data: allRows,
+      aggregations,
+      pagination: { pages_fetched: pageCount, total_records: allRows.length },
+    };
   }
 
   // --- Presets (UI report parity) ---
